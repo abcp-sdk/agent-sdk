@@ -1,4 +1,4 @@
-module github.com/abcp-sdk/agent-sdk
+module github.com/abcp-sdk/agent-sdk-go
 
 go 1.26
 
