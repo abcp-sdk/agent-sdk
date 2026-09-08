@@ -26,16 +26,53 @@ type Client struct {
 	svc  agentv1connect.AgentServiceClient
 }
 
+// Option customizes the client.
+type Option func(*clientOptions)
+
+type clientOptions struct {
+	httpClient *http.Client
+}
+
+// WithHTTPClient overrides the underlying HTTP client (e.g. a TLS client,
+// custom timeouts, or a proxy-aware transport).
+func WithHTTPClient(client *http.Client) Option {
+	return func(o *clientOptions) {
+		if client != nil {
+			o.httpClient = client
+		}
+	}
+}
+
+// h2cClient speaks unencrypted HTTP/2 (prior knowledge). The agent backend
+// serves HTTP/2 only — over plain http:// Go defaults to HTTP/1.1, which the
+// agent rejects — so this is the default transport for in-cluster calls.
+func h2cClient() *http.Client {
+	protocols := new(http.Protocols)
+	protocols.SetHTTP1(false)
+	protocols.SetUnencryptedHTTP2(true)
+	return &http.Client{
+		Transport: &http.Transport{Protocols: protocols},
+	}
+}
+
 // New builds an agent client. token, when non-empty, is sent as a Bearer
 // header on every request. baseURL is protocol+host (no trailing slash).
-func New(baseURL, token string) *Client {
+//
+// The default HTTP client speaks cleartext HTTP/2 (h2c prior knowledge),
+// matching the agent's HTTP/2-only listener; pass WithHTTPClient to
+// override (TLS endpoints, proxies, custom timeouts).
+func New(baseURL, token string, opts ...Option) *Client {
 	if token == "" {
 		token = "devtoken"
+	}
+	o := clientOptions{httpClient: h2cClient()}
+	for _, opt := range opts {
+		opt(&o)
 	}
 	return &Client{
 		base: baseURL,
 		svc: agentv1connect.NewAgentServiceClient(
-			http.DefaultClient,
+			o.httpClient,
 			baseURL,
 			connect.WithInterceptors(authInterceptor(token)),
 		),
@@ -55,14 +92,14 @@ func authInterceptor(token string) connect.Interceptor {
 
 // Session mirrors the agent's session row.
 type Session struct {
-	Name        string
-	Model       string
-	Preset      string
-	TipID       string
-	Org, Repo   string
-	Branch      string
+	Name         string
+	Model        string
+	Preset       string
+	TipID        string
+	Org, Repo    string
+	Branch       string
 	SystemPrompt string
-	MaxTurns    int32
+	MaxTurns     int32
 }
 
 func sessionFromPb(s *agentv1.Session) Session {
