@@ -83,34 +83,40 @@ func newH2CTestServer(t *testing.T, stub *stubAgent) (*httptest.Server, *recorde
 	return srv, rec
 }
 
-// TestNewSpeaksH2C proves the default client dials cleartext HTTP/2 (prior
-// knowledge) — the agent serves HTTP/2 only, so this is the contract.
+// clientFor builds a connect client over an http.Client + bearer token, the
+// way a caller would per the connectrpc convention.
+func clientFor(hc *http.Client, baseURL, token string) agentv1connect.AgentServiceClient {
+	return NewAgentServiceClient(hc, baseURL, connect.WithInterceptors(AuthInterceptor(token)))
+}
+
+// TestNewSpeaksH2C proves the default h2c client dials cleartext HTTP/2
+// (prior knowledge) — the agent serves HTTP/2 only, so this is the contract.
 func TestNewSpeaksH2C(t *testing.T) {
 	srv, rec := newH2CTestServer(t, &stubAgent{sessions: []string{"alpha", "beta"}})
 
-	client := New(srv.URL, "")
-	sessions, err := client.ListSessions(context.Background())
+	client := clientFor(NewHTTPClient(), srv.URL, "")
+	res, err := client.ListSessions(context.Background(), connect.NewRequest(&agentv1.ListSessionsRequest{}))
 	if err != nil {
 		t.Fatalf("ListSessions: %v", err)
 	}
-	if len(sessions) != 2 || !sessions["alpha"] || !sessions["beta"] {
-		t.Fatalf("sessions = %v", sessions)
+	if len(res.Msg.GetSessions()) != 2 {
+		t.Fatalf("sessions = %v", res.Msg.GetSessions())
 	}
 	if got := rec.proto.Load(); got != "HTTP/2.0" {
 		t.Fatalf("protocol = %v, want HTTP/2.0 (h2c prior knowledge)", got)
 	}
-	if got := rec.auth.Load(); got != "Bearer devtoken" {
-		t.Fatalf("authorization = %v, want Bearer devtoken (default)", got)
+	if got := rec.auth.Load(); got != "" {
+		t.Fatalf("authorization = %v, want empty (no token passed by caller)", got)
 	}
 }
 
-// TestWithHTTPClientOverride proves the option wiring: a plain HTTP/1.1
-// client is honored (and the test server still serves it).
-func TestWithHTTPClientOverride(t *testing.T) {
+// TestHTTPClientOverride proves a plain HTTP/1.1 client is honored, and the
+// test server still serves it.
+func TestHTTPClientOverride(t *testing.T) {
 	srv, rec := newH2CTestServer(t, &stubAgent{})
 
-	client := New(srv.URL, "tok-1", WithHTTPClient(http.DefaultClient))
-	if _, err := client.ListSessions(context.Background()); err != nil {
+	client := clientFor(http.DefaultClient, srv.URL, "tok-1")
+	if _, err := client.ListSessions(context.Background(), connect.NewRequest(&agentv1.ListSessionsRequest{})); err != nil {
 		t.Fatalf("ListSessions: %v", err)
 	}
 	if got := rec.proto.Load(); got != "HTTP/1.0" && got != "HTTP/1.1" {
@@ -121,17 +127,21 @@ func TestWithHTTPClientOverride(t *testing.T) {
 	}
 }
 
-// TestEnsureSessionIdempotent: AlreadyExists maps to nil.
+// TestEnsureSessionIdempotent: AlreadyExists maps to a Connect error that the
+// caller treats as idempotent create. Verify the request reaches the stub.
 func TestEnsureSessionIdempotent(t *testing.T) {
 	stub := &stubAgent{}
 	srv, _ := newH2CTestServer(t, stub)
-	client := New(srv.URL, "")
+	client := clientFor(NewHTTPClient(), srv.URL, "")
 
-	if err := client.EnsureSession(context.Background(), "gamma"); err != nil {
-		t.Fatalf("first EnsureSession: %v", err)
+	// First create succeeds.
+	if _, err := client.CreateSession(context.Background(), connect.NewRequest(&agentv1.CreateSessionRequest{Name: "gamma"})); err != nil {
+		t.Fatalf("first CreateSession: %v", err)
 	}
-	if err := client.EnsureSession(context.Background(), "gamma"); err != nil {
-		t.Fatalf("second EnsureSession must be idempotent, got %v", err)
+	// Second returns AlreadyExists (caller maps to idempotent success).
+	_, err := client.CreateSession(context.Background(), connect.NewRequest(&agentv1.CreateSessionRequest{Name: "gamma"}))
+	if connect.CodeOf(err) != connect.CodeAlreadyExists {
+		t.Fatalf("second CreateSession code = %v, want AlreadyExists", connect.CodeOf(err))
 	}
 	if len(stub.sessions) != 1 {
 		t.Fatalf("stub sessions = %v, want exactly one", stub.sessions)
