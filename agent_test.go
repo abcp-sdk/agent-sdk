@@ -86,7 +86,28 @@ func newH2CTestServer(t *testing.T, stub *stubAgent) (*httptest.Server, *recorde
 // clientFor builds a connect client over an http.Client + bearer token, the
 // way a caller would per the connectrpc convention.
 func clientFor(hc *http.Client, baseURL, token string) agentv1connect.AgentServiceClient {
-	return NewAgentServiceClient(hc, baseURL, connect.WithInterceptors(AuthInterceptor(token)))
+	return agentv1connect.NewAgentServiceClient(hc, baseURL, connect.WithInterceptors(authInterceptor(token)))
+}
+
+// newH2CClient returns a cleartext-HTTP/2 (prior knowledge) *http.Client,
+// matching the agent's HTTP/2-only listener.
+func newH2CClient() *http.Client {
+	protocols := new(http.Protocols)
+	protocols.SetHTTP1(false)
+	protocols.SetUnencryptedHTTP2(true)
+	return &http.Client{Transport: &http.Transport{Protocols: protocols}}
+}
+
+// authInterceptor attaches `Authorization: Bearer <token>` when non-empty.
+func authInterceptor(token string) connect.Interceptor {
+	return connect.UnaryInterceptorFunc(func(next connect.UnaryFunc) connect.UnaryFunc {
+		return func(ctx context.Context, req connect.AnyRequest) (connect.AnyResponse, error) {
+			if token != "" {
+				req.Header().Set("Authorization", "Bearer "+token)
+			}
+			return next(ctx, req)
+		}
+	})
 }
 
 // TestNewSpeaksH2C proves the default h2c client dials cleartext HTTP/2
@@ -94,7 +115,7 @@ func clientFor(hc *http.Client, baseURL, token string) agentv1connect.AgentServi
 func TestNewSpeaksH2C(t *testing.T) {
 	srv, rec := newH2CTestServer(t, &stubAgent{sessions: []string{"alpha", "beta"}})
 
-	client := clientFor(NewHTTPClient(), srv.URL, "")
+	client := clientFor(newH2CClient(), srv.URL, "")
 	res, err := client.ListSessions(context.Background(), connect.NewRequest(&agentv1.ListSessionsRequest{}))
 	if err != nil {
 		t.Fatalf("ListSessions: %v", err)
@@ -132,7 +153,7 @@ func TestHTTPClientOverride(t *testing.T) {
 func TestEnsureSessionIdempotent(t *testing.T) {
 	stub := &stubAgent{}
 	srv, _ := newH2CTestServer(t, stub)
-	client := clientFor(NewHTTPClient(), srv.URL, "")
+	client := clientFor(newH2CClient(), srv.URL, "")
 
 	// First create succeeds.
 	if _, err := client.CreateSession(context.Background(), connect.NewRequest(&agentv1.CreateSessionRequest{Name: "gamma"})); err != nil {
